@@ -83,6 +83,15 @@ body { margin: 0; background: var(--bg-page); color: var(--text-primary); }
 .pagination { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 13px; color: var(--text-secondary); }
 .pagination button { padding: 5px 10px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); border-radius: 6px; cursor: pointer; }
 .pagination button:disabled { opacity: 0.4; cursor: default; }
+.table-header-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.table-header-row h3 { margin: 0; }
+.export-buttons { display: flex; gap: 8px; }
+.export-buttons button {
+  padding: 6px 12px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary);
+  border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px;
+}
+.export-buttons button:hover { background: rgba(128,128,128,0.08); }
+.export-status { font-size: 12px; color: var(--text-secondary); margin-left: 4px; }
 .dashboard-footer { text-align: center; font-size: 12px; color: var(--text-secondary); padding: 16px 0 4px; }
 @media (max-width: 900px) {
   .chart-row { grid-template-columns: 1fr; }
@@ -109,6 +118,22 @@ body { margin: 0; background: var(--bg-page); color: var(--text-primary); }
           <option value="4" selected>4+ days of data</option>
           <option value="7">Full 7-day weeks only</option>
         </select>
+      </div>
+      <div class="filter-group">
+        <label for="direction-filter">Direction</label>
+        <select id="direction-filter">
+          <option value="">All</option>
+          <option value="over">Predicted &gt; Actual</option>
+          <option value="under">Actual &gt; Predicted</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label for="week-from-filter">From week</label>
+        <select id="week-from-filter"></select>
+      </div>
+      <div class="filter-group">
+        <label for="week-to-filter">To week</label>
+        <select id="week-to-filter"></select>
       </div>
     </div>
   </header>
@@ -139,7 +164,13 @@ body { margin: 0; background: var(--bg-page); color: var(--text-primary); }
   </section>
 
   <section class="table-section">
-    <h3>Detail (click a column to sort)</h3>
+    <div class="table-header-row">
+      <h3>Detail (click a column to sort)</h3>
+      <div class="export-buttons">
+        <button id="export-csv">Export CSV</button>
+        <span class="export-status" id="export-status"></span>
+      </div>
+    </div>
     <table class="data-table" id="data-table">
       <thead>
         <tr>
@@ -185,7 +216,18 @@ function median(arr) {
 function getFiltered() {
   const sku = document.getElementById('sku-filter').value;
   const minDays = parseInt(document.getElementById('reliability-filter').value, 10);
-  return RAW_DATA.filter(r => (!sku || r.iSKU === sku) && r['Days With Data'] >= minDays);
+  const direction = document.getElementById('direction-filter').value;
+  const weekFrom = document.getElementById('week-from-filter').value;
+  const weekTo = document.getElementById('week-to-filter').value;
+  return RAW_DATA.filter(r => {
+    if (sku && r.iSKU !== sku) return false;
+    if (r['Days With Data'] < minDays) return false;
+    if (direction === 'over' && !(r['Diff'] < 0)) return false;
+    if (direction === 'under' && !(r['Diff'] > 0)) return false;
+    if (weekFrom && r['Week Start Date'] < weekFrom) return false;
+    if (weekTo && r['Week Start Date'] > weekTo) return false;
+    return true;
+  });
 }
 
 function populateSkuFilter() {
@@ -196,6 +238,22 @@ function populateSkuFilter() {
     opt.value = s; opt.textContent = s;
     sel.appendChild(opt);
   });
+}
+
+function populateWeekFilters() {
+  const weeks = [...new Set(RAW_DATA.map(r => r['Week Start Date']))].sort();
+  const fromSel = document.getElementById('week-from-filter');
+  const toSel = document.getElementById('week-to-filter');
+  weeks.forEach(w => {
+    const opt1 = document.createElement('option');
+    opt1.value = w; opt1.textContent = w;
+    fromSel.appendChild(opt1);
+    const opt2 = document.createElement('option');
+    opt2.value = w; opt2.textContent = w;
+    toSel.appendChild(opt2);
+  });
+  fromSel.value = weeks[0];
+  toSel.value = weeks[weeks.length - 1];
 }
 
 function renderKPIs(data) {
@@ -297,6 +355,58 @@ function renderTable(data) {
   document.getElementById('next-page').disabled = currentPage >= totalPages - 1;
 }
 
+function getSortedFiltered() {
+  const data = getFiltered();
+  return [...data].sort((a,b) => {
+    let av = a[sortKey], bv = b[sortKey];
+    if (typeof av === 'string' && sortKey !== 'Week Start Date') { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1*sortDir; if (av > bv) return 1*sortDir; return 0;
+  });
+}
+
+async function saveFile(filename, data) {
+  const statusEl = document.getElementById('export-status');
+  if (window.claude && typeof window.claude.use === 'function') {
+    try {
+      const downloads = await window.claude.use('downloads');
+      if (downloads) {
+        await downloads.save({ filename, data });
+        statusEl.textContent = 'Saved.';
+        setTimeout(() => statusEl.textContent = '', 2500);
+        return;
+      }
+    } catch (e) {
+      if (e && e.code === 'declined') return;
+      // otherwise fall through to the browser fallback below
+    }
+  }
+  const blob = data instanceof Blob ? data : new Blob([data], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  statusEl.textContent = 'Downloaded.';
+  setTimeout(() => statusEl.textContent = '', 2500);
+}
+
+function toCSVValue(v) {
+  const s = String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function exportCSV() {
+  const rows = getSortedFiltered();
+  const cols = ['iSKU','Week Start Date','Predicted Velocity','Actual Velocity','Days With Data','Diff','Pct Diff'];
+  const lines = [cols.join(',')];
+  rows.forEach(r => {
+    lines.push(cols.map(c => toCSVValue(r[c] === null || r[c] === '' ? '' : r[c])).join(','));
+  });
+  saveFile('smart_velocity_detail.csv', lines.join('\n'));
+}
+
+document.getElementById('export-csv').addEventListener('click', exportCSV);
+
 function renderAll() {
   const data = getFiltered();
   renderKPIs(data);
@@ -309,6 +419,9 @@ function renderAll() {
 
 document.getElementById('sku-filter').addEventListener('change', renderAll);
 document.getElementById('reliability-filter').addEventListener('change', renderAll);
+document.getElementById('direction-filter').addEventListener('change', renderAll);
+document.getElementById('week-from-filter').addEventListener('change', renderAll);
+document.getElementById('week-to-filter').addEventListener('change', renderAll);
 document.querySelectorAll('.data-table thead th').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.key;
@@ -321,6 +434,7 @@ document.getElementById('prev-page').addEventListener('click', () => { if (curre
 document.getElementById('next-page').addEventListener('click', () => { currentPage++; renderTable(getFiltered()); });
 
 populateSkuFilter();
+populateWeekFilters();
 renderAll();
 </script>
 </body>
